@@ -1,65 +1,88 @@
-#!/bin/sh
+#!/usr/bin/env python
 
-set -xe
-
-if [ -z "$1" ]; then
-    echo "Usage: $0 <prefix>"
-    exit 1
-fi
-
-destdir=$1
-
-builddir=`pwd`/build
-sourcedir=`pwd`/source
-
-for d in $builddir $destdir; do
-    if [ -e $d ]; then
-        rm -rf $d
-    fi
-done
-
-extract() {
-    path=$builddir/$1
-    url=$2
-    tarball=$sourcedir/`echo $url | sed -e 's/.*\///'`
-
-    if [ ! -e $tarball ]; then
-        curl -L -o $tarball $url
-    fi
-
-    mkdir $path
-    tar xf $tarball -C $path --strip-components 1
-}
-
-if [ "`uname`" = "Linux" ]; then
-    outputdir=/output
-    outputfile=$outputdir/openssl-manylinux_$(uname -m).tar.bz2
-elif [ "`uname`" = "Darwin" ]; then
-    outputdir=`pwd`/output
-    outputfile=$outputdir/openssl-macosx_$(uname -m).tar.bz2
-else
-    echo "Unknown platform"
-    exit 1
-fi
+import argparse
+import logging
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
 
 
-mkdir -p $outputdir
-if [ ! -e $outputfile ]; then
-    mkdir $builddir
-    mkdir -p $sourcedir
-    cd $builddir
+def download(tarball_url, cache_dir):
+    tarball_name = tarball_url.split("/")[-1]
+    tarball_file = os.path.join(cache_dir, tarball_name)
+    if not os.path.exists(tarball_file):
+        logging.info("Downloading %s" % tarball_url)
+        if not os.path.exists(cache_dir):
+            os.mkdir(cache_dir)
+        subprocess.check_call(
+            ["curl", "--location", "--output", tarball_file, "--silent", tarball_url]
+        )
+    return tarball_file
 
-    # build openssl
-    extract openssl https://www.openssl.org/source/openssl-1.1.1f.tar.gz
-    cd openssl
-    ./config no-comp no-shared no-tests
-    make
 
-    # install headers and libraries
-    mkdir $destdir
-    mkdir $destdir/lib
-    cp -R include $destdir
-    cp libcrypto.a libssl.a $destdir/lib
-    
-    tar cjvf $outputfile -C $destdir include lib
-fi
+def get_platform():
+    if sys.platform == "linux":
+        return "manylinux_%s" % os.uname().machine
+    elif sys.platform == "darwin":
+        return "macosx_%s" % os.uname().machine
+    elif sys.platform == "win32":
+        return "win%s" % (struct.calcsize("P") * 8)
+    else:
+        raise Exception("Unsupported platfom %s" % sys.platform)
+
+
+parser = argparse.ArgumentParser(description="Build OpenSSL")
+parser.add_argument("destination_dir")
+parser.add_argument("--cache-dir", default="tarballs")
+parser.add_argument("--output-dir", default="output")
+args = parser.parse_args()
+logging.basicConfig(level=logging.INFO)
+
+# work around buggy 'tar' executable on Windows
+if sys.platform == "win32":
+    os.environ["PATH"] = "C:\\Program Files\\Git\\usr\\bin;" + os.environ["PATH"]
+
+# create fresh destination directory
+logging.info("Creating directory %s" % args.destination_dir)
+if os.path.exists(args.destination_dir):
+    shutil.rmtree(args.destination_dir)
+os.mkdir(args.destination_dir)
+include_dir = os.path.join(args.destination_dir, "include")
+library_dir = os.path.join(args.destination_dir, "lib")
+
+# create output directory
+if not os.path.exists(args.output_dir):
+    os.mkdir(args.output_dir)
+
+output_file = os.path.join(args.output_dir, "openssl-%s.tar.bz2" % get_platform())
+if not os.path.exists(output_file):
+    tarball_url = "https://www.openssl.org/source/openssl-1.1.1f.tar.gz"
+    tarball_file = download(tarball_url, cache_dir=args.cache_dir)
+
+    current_dir = os.getcwd()
+    with tempfile.TemporaryDirectory() as build_dir:
+        logging.info("Extracting %s to %s" % (tarball_file, build_dir))
+        subprocess.check_call(
+            ["tar", "xf", tarball_file, "-C", build_dir, "--strip-components", "1"]
+        )
+        os.chdir(build_dir)
+
+        logging.info("Building OpenSSL")
+        subprocess.check_call(["./config", "no-comp", "no-shared", "no-tests"])
+        subprocess.check_call(["make"])
+
+        logging.info("Installing files")
+        shutil.copytree("include", include_dir)
+        os.mkdir(library_dir)
+        shutil.copy("libcrypto.a", library_dir)
+        shutil.copy("libssl.a", library_dir)
+
+        os.chdir(current_dir)
+
+    logging.info("Creating %s" % output_file)
+    subprocess.check_call(
+        ["tar", "cjvf", output_file, "-C", args.destination_dir, "include", "lib"]
+    )
