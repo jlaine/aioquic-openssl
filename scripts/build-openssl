@@ -41,9 +41,16 @@ parser.add_argument("--output-dir", default="output")
 args = parser.parse_args()
 logging.basicConfig(level=logging.INFO)
 
-# work around buggy 'tar' executable on Windows
 if sys.platform == "win32":
+    library_suffix = ".lib"
+
+    # work around buggy 'tar' executable on Windows
     os.environ["PATH"] = "C:\\Program Files\\Git\\usr\\bin;" + os.environ["PATH"]
+
+    # add NASM to path
+    os.environ["PATH"] = os.environ["PATH"] + ";C:\\Program Files\\NASM"
+else:
+    library_suffix = ".a"
 
 # create fresh destination directory
 logging.info("Creating directory %s" % args.destination_dir)
@@ -71,14 +78,32 @@ if not os.path.exists(output_file):
         os.chdir(build_dir)
 
         logging.info("Building OpenSSL")
-        subprocess.check_call(["./config", "no-comp", "no-shared", "no-tests"])
-        subprocess.check_call(["make"])
+        if sys.platform == "win32":
+            if get_platform() == "win64":
+                openssl_config = "VC-WIN64A"
+                visual_studio_arch = "x64"
+            else:
+                openssl_config = "VC-WIN32"
+                visual_studio_arch = "x86"
+
+            subprocess.check_call(
+                (
+                    '"C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat" %s && '
+                    "perl Configure no-comp no-shared no-tests %s && "
+                    "nmake"
+                )
+                % (visual_studio_arch, openssl_config),
+                shell=True,
+            )
+        else:
+            subprocess.check_call(["./config", "no-comp", "no-shared", "no-tests"])
+            subprocess.check_call(["make"])
 
         logging.info("Installing files")
         shutil.copytree("include", include_dir)
         os.mkdir(library_dir)
-        shutil.copy("libcrypto.a", library_dir)
-        shutil.copy("libssl.a", library_dir)
+        shutil.copy("libcrypto" + library_suffix, library_dir)
+        shutil.copy("libssl" + library_suffix, library_dir)
 
         os.chdir(current_dir)
 
